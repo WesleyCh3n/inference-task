@@ -1,0 +1,4 @@
+CompileFlags:
+  Add:
+    - -I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/
+    - -I./build/_deps/fmt-src/include/
