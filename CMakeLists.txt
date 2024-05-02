@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(lirm-schema)
+project(model-infer-task)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
 file(
@@ -11,6 +11,10 @@ file(
 )
 include(${CMAKE_CURRENT_BINARY_DIR}/cmake/CPM.cmake)
 CPMAddPackage("gh:fmtlib/fmt#10.2.1")
+CPMAddPackage("gh:cameron314/concurrentqueue#v1.0.4")
 
 add_executable(main ${CMAKE_CURRENT_SOURCE_DIR}/main.cc)
-target_link_libraries(main fmt::fmt)
+target_link_libraries(main
+  fmt::fmt
+  concurrentqueue
+)
