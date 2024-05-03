@@ -1,5 +1,4 @@
-#include "concurrentqueue.h"
-
+#include <concurrentqueue.h>
 #include <fmt/core.h>
 #include <fmt/ostream.h>
 #include <fmt/ranges.h>
@@ -11,6 +10,9 @@
 #include <memory>
 #include <vector>
 
+#include "noncopyable.hpp"
+#include "stoppable_thread.hpp"
+
 volatile sig_atomic_t g_stop = 0;
 
 void sigint_handler(int) {
@@ -21,45 +23,33 @@ void sigint_handler(int) {
 const uint32_t FPS = 5;
 const uint32_t nProducers = 5;
 
-// a base case of thread
-class StoppableThread {
-  std::unique_ptr<std::thread> thread_;
-  std::atomic_bool stop_;
-
+// data between producer and consumer. make it moveable but not copyable
+class Frame : Noncopyable {
 public:
-  explicit StoppableThread() : thread_(nullptr), stop_(false) {}
-  virtual ~StoppableThread() = default;
-  void start() {
-    fmt::println("{} started.", name());
-    thread_ = std::make_unique<std::thread>(&StoppableThread::main, this);
-  }
-  void main() {
-    while (!stop_.load()) {
-      this->run();
-    }
-  }
-  virtual void run() = 0;
-  virtual std::string name() = 0;
-  void stop() { stop_.store(true); }
-  void wait() {
-    if (thread_ && thread_->joinable()) {
-      thread_->join();
-      fmt::println("{} finished.", name());
-    }
-  }
-};
-
-// data between producer and consumer
-struct Frame {
   int producer_id;
   int id;
   int data;
+
+  Frame() = default;
+  Frame(int producer_id, int id, int data)
+      : producer_id(producer_id), id(id), data(data) {}
+  // move constructor
+  Frame(Frame &&other) noexcept : producer_id(other.producer_id), id(other.id) {
+    data = other.data; // this can be moved
+  }
+  // move assignment
+  Frame &operator=(Frame &&other) noexcept {
+    producer_id = other.producer_id;
+    id = other.id;
+    data = other.data; // this can be moved
+    return *this;
+  }
+  // for easy printing
+  friend std::ostream &operator<<(std::ostream &os, const Frame &x) {
+    return os << fmt::format("[p: {}, i: {}, d: {}]", x.producer_id, x.id,
+                             x.data);
+  }
 };
-// for easy printing
-std::ostream &operator<<(std::ostream &os, const Frame &x) {
-  return os << fmt::format("[p: {}, i: {}, d: {}]", x.producer_id, x.id,
-                           x.data);
-}
 template <> struct fmt::formatter<Frame> : ostream_formatter {};
 
 // consumer thread. take input from producer and output to post-consumer based
@@ -77,11 +67,12 @@ public:
     std::vector<Frame> v(nProducers * 2);
     std::size_t count = q_.try_dequeue_bulk(v.begin(), v.size());
     if (count > 0) {
-      fmt::println("{} dequeued {}.", name(),
-                   std::vector<Frame>(v.begin(), v.begin() + count));
+      std::vector<Frame> result(std::make_move_iterator(v.begin()),
+                                std::make_move_iterator(v.begin() + count));
+      fmt::println("{} dequeued {}.", name(), result);
 
       for (int i = 0; i < count; ++i) {
-        q_out_[v[i].producer_id].try_enqueue(v[i]);
+        q_out_[result[i].producer_id].try_enqueue(std::move(result[i]));
       }
     } else {
       std::this_thread::sleep_for(std::chrono::milliseconds(1000 / FPS));
@@ -101,7 +92,7 @@ public:
 
   void run() final {
     Frame frame{id_, frame_, frame_};
-    bool success = q_.try_enqueue(frame);
+    bool success = q_.try_enqueue(std::move(frame));
     if (success) {
       fmt::println("{} enqueue {}.", name(), frame_);
     } else {
@@ -124,8 +115,10 @@ public:
     std::vector<Frame> frames(FPS);
     int count = q_.try_dequeue_bulk(frames.begin(), frames.size());
     if (count > 0) {
-      fmt::println("{} dequeued {}.", name(),
-                   std::vector<Frame>(frames.begin(), frames.begin() + count));
+      std::vector<Frame> result(
+          std::make_move_iterator(frames.begin()),
+          std::make_move_iterator(frames.begin() + count));
+      fmt::println("{} dequeued {}.", name(), result);
     } else {
       std::this_thread::sleep_for(std::chrono::milliseconds(1000 / FPS));
     }
