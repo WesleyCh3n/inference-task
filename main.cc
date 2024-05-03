@@ -21,6 +21,7 @@ void sigint_handler(int) {
 const uint32_t FPS = 5;
 const uint32_t nProducers = 5;
 
+// a base case of thread
 class StoppableThread {
   std::unique_ptr<std::thread> thread_;
   std::atomic_bool stop_;
@@ -48,17 +49,21 @@ public:
   }
 };
 
+// data between producer and consumer
 struct Frame {
   int producer_id;
   int id;
   int data;
 };
+// for easy printing
 std::ostream &operator<<(std::ostream &os, const Frame &x) {
   return os << fmt::format("[p: {}, i: {}, d: {}]", x.producer_id, x.id,
                            x.data);
 }
 template <> struct fmt::formatter<Frame> : ostream_formatter {};
 
+// consumer thread. take input from producer and output to post-consumer based
+// on id. Use case: model inference
 class Consumer : public StoppableThread {
   moodycamel::ConcurrentQueue<Frame> &q_;
   std::unordered_map<int, moodycamel::ConcurrentQueue<Frame>> &q_out_;
@@ -84,6 +89,7 @@ public:
   }
 };
 
+// producer thread. put input into queue. Use case: stream decoding
 class Producer : public StoppableThread {
   moodycamel::ConcurrentQueue<Frame> &q_;
   int id_;
@@ -106,6 +112,7 @@ public:
   }
 };
 
+// post-consumer thread. take output from consumer. Use case: post-processing
 class PostConsumer : public StoppableThread {
   moodycamel::ConcurrentQueue<Frame> &q_;
   int id_;
