@@ -49,30 +49,30 @@ template <> struct fmt::formatter<Frame> : ostream_formatter {};
 // consumer thread. take input from producer and output to post-consumer based
 // on id. Use case: model inference
 class Consumer : public StoppableThread {
-  moodycamel::ConcurrentQueue<Frame> &q_;
-  std::unique_ptr<moodycamel::ConsumerToken> token_;
+  moodycamel::ConcurrentQueue<Frame> &q_in_;
+  std::unique_ptr<moodycamel::ConsumerToken> in_tok_;
   moodycamel::ConcurrentQueue<Frame> &q_out_;
-  std::unordered_map<int, std::shared_ptr<moodycamel::ProducerToken>> &tokens_;
+  std::unordered_map<int, std::shared_ptr<moodycamel::ProducerToken>>
+      &out_toks_;
 
 public:
-  Consumer(moodycamel::ConcurrentQueue<Frame> &q,
+  Consumer(moodycamel::ConcurrentQueue<Frame> &q_in,
            moodycamel::ConcurrentQueue<Frame> &q_out,
            std::unordered_map<int, std::shared_ptr<moodycamel::ProducerToken>>
                &tokens)
-      : q_(q), q_out_(q_out),
-        token_(std::make_unique<moodycamel::ConsumerToken>(q)),
-        tokens_(tokens) {}
+      : q_in_(q_in), in_tok_(std::make_unique<moodycamel::ConsumerToken>(q_in)),
+        q_out_(q_out), out_toks_(tokens) {}
   std::string name() final { return "Consumer"; }
   void run() final {
     std::vector<Frame> v(nProducers * 2);
-    std::size_t count = q_.try_dequeue_bulk(*token_, v.begin(), v.size());
+    std::size_t count = q_in_.try_dequeue_bulk(*in_tok_, v.begin(), v.size());
     if (count > 0) {
       std::vector<Frame> result(std::make_move_iterator(v.begin()),
                                 std::make_move_iterator(v.begin() + count));
-      fmt::println("{} dequeued {}.", name(), result);
+      fmt::println("{} <- {}.", name(), result);
 
       for (int i = 0; i < count; ++i) {
-        q_out_.try_enqueue(*tokens_[result[i].producer_id],
+        q_out_.try_enqueue(*out_toks_[result[i].producer_id],
                            std::move(result[i]));
       }
     } else {
@@ -92,13 +92,13 @@ public:
   Producer(moodycamel::ConcurrentQueue<Frame> &q, int id)
       : q_(q), token_(std::make_unique<moodycamel::ProducerToken>(q)), id_(id) {
   }
-  std::string name() final { return fmt::format("Producer: {}", id_); }
+  std::string name() final { return fmt::format("Producer[{}]", id_); }
 
   void run() final {
     Frame frame{id_, frame_, frame_};
     bool success = q_.try_enqueue(*token_, std::move(frame));
     if (success) {
-      fmt::println("{} enqueue {}.", name(), frame_);
+      fmt::println("{} -> {}.", name(), frame_);
     } else {
       fmt::println("{} failed enqueue.", name());
     }
@@ -125,12 +125,12 @@ public:
       std::vector<Frame> result(
           std::make_move_iterator(frames.begin()),
           std::make_move_iterator(frames.begin() + count));
-      fmt::println("{} dequeued {}.", name(), result);
+      fmt::println("{} <- {}.", name(), result);
     } else {
       std::this_thread::sleep_for(std::chrono::milliseconds(1000 / FPS));
     }
   }
-  std::string name() final { return fmt::format("PostConsumer: {}", id_); }
+  std::string name() final { return fmt::format("PostConsumer[{}]", id_); }
 };
 
 int main(int argc, char *argv[]) {
@@ -144,22 +144,16 @@ int main(int argc, char *argv[]) {
   moodycamel::ConcurrentQueue<Frame> q_in(32 * 10);
   moodycamel::ConcurrentQueue<Frame> q_out(32 * 10);
 
-  std::unordered_map<int, std::shared_ptr<moodycamel::ProducerToken>>
-      post_tokens;
+  std::unordered_map<int, std::shared_ptr<moodycamel::ProducerToken>> ptoks;
   for (int i = 0; i < nProducers; i++) {
-    std::unique_ptr<Producer> p = std::make_unique<Producer>(q_in, i);
-    std::shared_ptr<moodycamel::ProducerToken> post_token =
-        std::make_shared<moodycamel::ProducerToken>(q_out);
-    std::unique_ptr<PostConsumer> pc =
-        std::make_unique<PostConsumer>(q_out, i, post_token);
-    post_tokens.insert({i, std::move(post_token)});
-    threads.push_back(std::move(p));
-    threads.push_back(std::move(pc));
+    // using emplace to avoid copy
+    ptoks.emplace(
+        std::make_pair(i, std::make_shared<moodycamel::ProducerToken>(q_out)));
+    threads.emplace_back(std::make_unique<Producer>(q_in, i));
+    threads.emplace_back(std::make_unique<PostConsumer>(q_out, i, ptoks.at(i)));
   }
 
-  std::unique_ptr<Consumer> consumer =
-      std::make_unique<Consumer>(q_in, q_out, post_tokens);
-  threads.push_back(std::move(consumer));
+  threads.emplace_back(std::make_unique<Consumer>(q_in, q_out, ptoks));
 
   // start all threads
   for (auto &t : threads)
